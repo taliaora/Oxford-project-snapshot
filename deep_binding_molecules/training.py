@@ -149,3 +149,142 @@ def load_model(args, data_sample, device, **kwargs):
                                        rec_input_edge_feats_dim=data_sample[1].edata['feat'].shape[1],
                                        **args.model_parameters, **kwargs)
     return model
+
+
+
+def train(args, run_dir):
+    # Seed for reproducibility
+    seed_all(args.seed)
+
+    # Determine the device for training based on GPU availability
+    device = torch.device("cuda:0" if torch.cuda.is_available() and args.device == 'cuda' else "cpu")
+
+    # Define a dictionary of metrics to be used during training and evaluation
+    metrics_dict = {
+        'rsquared': Rsquared(),
+        'mean_rmsd': RMSD(),
+        'rmsd_less_than_20': RMSDfraction(20),
+        'rmsd_less_than_50': RMSDfraction(50),
+        'median_rmsd': RMSDmedian(),
+        'median_centroid_distance': CentroidDistMedian(),
+        'centroid_distance_less_than_2': CentroidDistFraction(2),
+        'centroid_distance_less_than_5': CentroidDistFraction(5),
+        'centroid_distance_less_than_10': CentroidDistFraction(10),
+        'centroid_distance_less_than_20': CentroidDistFraction(20),
+        'centroid_distance_less_than_50': CentroidDistFraction(50),
+        'kabsch_rmsd': KabschRMSD(),
+        # Add other metrics or arguments as needed
+    }
+
+    # Load training and validation datasets
+    train_data = PDBBind(device=device, complex_names_path=args.train_names,
+                        lig_predictions_name=args.train_predictions_name, is_train_data=True, **args.dataset_params)
+    val_data = PDBBind(device=device, complex_names_path=args.val_names,
+                      lig_predictions_name=args.val_predictions_name, **args.dataset_params)
+
+    # Subset the datasets if specified number of samples is provided
+    if args.num_train is not None:
+        train_data = Subset(train_data, get_random_indices(len(train_data))[:args.num_train])
+    if args.num_val is not None:
+        val_data = Subset(val_data, get_random_indices(len(val_data))[:args.num_val])
+
+    # Log the sizes of the training and validation datasets
+    log('train size: ', len(train_data))
+    log('val size: ', len(val_data))
+
+    # Load the model
+    model = load_model(args, data_sample=train_data[0], device=device)
+    
+    # Log the number of trainable parameters in the model
+    log('trainable params in model: ', sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+    # Determine the collate function based on arguments
+    collate_function = globals()[args.collate_function] if args.collate_params == {} else globals()[args.collate_function](**args.collate_params)
+
+    # Create data loaders for training and validation
+    if args.train_sampler is not None:
+        # Use a custom sampler if specified
+        sampler = globals()[args.train_sampler](data_source=train_data, batch_size=args.batch_size)
+        train_loader = DataLoader(train_data, batch_sampler=sampler, collate_fn=collate_function,
+                                  pin_memory=args.pin_memory, num_workers=args.num_workers)
+    else:
+        # Use default shuffling if no custom sampler is specified
+        sampler = None
+        train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=collate_function,
+                                  pin_memory=args.pin_memory, num_workers=args.num_workers)
+    
+    # Create a validation data loader
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, collate_fn=collate_function,
+                            pin_memory=args.pin_memory, num_workers=args.num_workers)
+
+    # Select metrics for training
+    metrics = {metric: metrics_dict[metric] for metric in args.metrics}
+
+    # Create the trainer instance
+    trainer = get_trainer(args=args, model=model, data=train_data, device=device, metrics=metrics, run_dir=run_dir,
+                          sampler=sampler)
+
+    # Train the model and obtain validation metrics
+    val_metrics, _, _ = trainer.train(train_loader, val_loader)
+
+    # If evaluation on the test set is enabled
+    if args.eval_on_test:
+        # Load the test dataset
+        test_data = PDBBind(device=device, complex_names_path=args.test_names, **args.dataset_params)
+        test_loader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=collate_function,
+                                 pin_memory=args.pin_memory, num_workers=args.num_workers)
+        log('test size: ', len(test_data))
+        
+        # Evaluate on the test set and return validation and test metrics along with log directory
+        test_metrics, _, _ = trainer.evaluation(test_loader, data_split='test')
+        return val_metrics, test_metrics, trainer.writer.log_dir
+
+    # Return validation metrics if test evaluation is not required
+    return val_metrics
+
+
+
+
+
+
+def get_arguments():
+    # Parse command-line arguments
+    args = parse_arguments()
+
+    # If a configuration file is provided
+    if args.config:
+        # Load configuration settings from the file
+        config_dict = yaml.load(args.config, Loader=yaml.FullLoader)
+        arg_dict = args.__dict__
+
+        # Update arguments with values from the configuration file
+        for key, value in config_dict.items():
+            if isinstance(value, list):
+                for v in value:
+                    arg_dict[key].append(v)
+            else:
+                arg_dict[key] = value
+
+        # Update the 'config' attribute to store the configuration file name
+        args.config = args.config.name
+    else:
+        config_dict = {}
+
+    # If a checkpoint file is provided
+    if args.checkpoint:
+        # Load arguments from the checkpoint file
+        arg_dict = args.__dict__
+        with open(os.path.join(os.path.dirname(args.checkpoint), 'train_arguments.yaml'), 'r') as arg_file:
+            checkpoint_dict = yaml.load(arg_file, Loader=yaml.FullLoader)
+
+        # Update arguments with values from the checkpoint file, avoiding conflicts with config file
+        for key, value in checkpoint_dict.items():
+            if key not in config_dict.keys():
+                if isinstance(value, list):
+                    for v in value:
+                        arg_dict[key].append(v)
+                else:
+                    arg_dict[key] = value
+
+    return args
+
