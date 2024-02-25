@@ -288,3 +288,114 @@ def get_arguments():
 
     return args
 
+
+
+def main_function():
+    # Get command line arguments
+    args = get_arguments()
+
+    if args.multithreaded_seeds:
+        # Execute in parallel using ThreadPoolExecutor for multiple seed values
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+
+            # Iterate over each seed value
+            for seed in args.multithreaded_seeds:
+                # Create a copy of arguments for each seed value
+                args_copy = get_arguments()
+                args_copy.seed = seed
+
+                # Submit the training task with different seed values
+                futures.append(executor.submit(train_wrapper, args_copy))
+
+            # Retrieve results from parallel executions
+            results = [f.result() for f in futures]
+
+        # Aggregate validation and test metrics across different seed values
+        all_val_metrics = defaultdict(list)
+        all_test_metrics = defaultdict(list)
+        log_dirs = []
+
+        for result in results:
+            val_metrics, test_metrics, log_dir = result
+            log_dirs.append(log_dir)
+
+            # Collect metrics for each key (evaluation metric)
+            for key in val_metrics.keys():
+                all_val_metrics[key].append(val_metrics[key])
+                all_test_metrics[key].append(test_metrics[key])
+
+        # Create and write statistics files for validation results
+        files = [open(os.path.join(dir, 'multiple_seed_validation_statistics.txt'), 'w') for dir in log_dirs]
+
+        print('Validation results:')
+        for key, value in all_val_metrics.items():
+            metric = np.array(value)
+
+            # Write statistics to files
+            for file in files:
+                file.write(f'\n{key:}\n')
+                file.write(f'mean: {metric.mean()}\n')
+                file.write(f'stddev: {metric.std()}\n')
+                file.write(f'stderr: {metric.std() / np.sqrt(len(metric))}\n')
+                file.write(f'values: {value}\n')
+
+            # Display statistics on the console
+            print(f'\n{key}:')
+            print(f'mean: {metric.mean()}')
+            print(f'stddev: {metric.std()}')
+            print(f'stderr: {metric.std() / np.sqrt(len(metric))}')
+            print(f'values: {value}')
+
+        # Close statistics files
+        for file in files:
+            file.close()
+
+        # Create and write statistics files for test results
+        files = [open(os.path.join(dir, 'multiple_seed_test_statistics.txt'), 'w') for dir in log_dirs]
+
+        print('Test results:')
+        for key, value in all_test_metrics.items():
+            metric = np.array(value)
+
+            # Write statistics to files
+            for file in files:
+                file.write(f'\n{key:}\n')
+                file.write(f'mean: {metric.mean()}\n')
+                file.write(f'stddev: {metric.std()}\n')
+                file.write(f'stderr: {metric.std() / np.sqrt(len(metric))}\n')
+                file.write(f'values: {value}\n')
+
+            # Display statistics on the console
+            print(f'\n{key}:')
+            print(f'mean: {metric.mean()}')
+            print(f'stddev: {metric.std()}')
+            print(f'stderr: {metric.std() / np.sqrt(len(metric))}')
+            print(f'values: {value}')
+
+        # Close statistics files
+        for file in files:
+            file.close()
+    else:
+        # If no multithreading, execute the training with a single set of arguments
+        train_wrapper(args)
+
+
+if __name__ == '__main__':
+    # Get the current date and time for logging purposes
+    start_time = datetime.now().strftime('date%d-%m_time%H-%M-%S.%f')
+
+    # Create a 'logs' directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+
+    # Open a log file with the current date and time
+    with open(os.path.join('logs', f'{start_time}.log'), "w") as file:
+        try:
+            # Execute the main function
+            main_function()
+        except Exception as e:
+            # Log any exceptions that occur during execution
+            traceback.print_exc(file=file)
+            raise
+
