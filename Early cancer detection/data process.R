@@ -4,7 +4,6 @@ library(ROCR)
 library(pracma)
 library(signal)
 library(ggplot2)
-library(PPRaman)
 library(reshape2)
 library(hyperSpec)
 
